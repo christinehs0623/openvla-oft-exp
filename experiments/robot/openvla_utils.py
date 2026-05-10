@@ -286,7 +286,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
         low_cpu_mem_usage=True,
-        trust_remote_code=True,
+        trust_remote_code=False, # USE LOCAL CODE
     )
 
     # If using FiLM, wrap the vision backbone to allow for infusion of language inputs
