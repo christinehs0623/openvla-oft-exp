@@ -267,26 +267,41 @@ def get_vla(cfg: Any) -> torch.nn.Module:
     # actually go into effect
     # If loading a pretrained checkpoint from Hugging Face Hub, we just assume that the policy
     # will be used as is, with its original modeling logic
-    if not model_is_on_hf_hub(cfg.pretrained_checkpoint):
-        # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
-        AutoConfig.register("openvla", OpenVLAConfig)
-        AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
-        AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
-        AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+    # if not model_is_on_hf_hub(cfg.pretrained_checkpoint):
+    #     # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
+    #     AutoConfig.register("openvla", OpenVLAConfig)
+    #     AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+    #     AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+    #     AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
-        # Update config.json and sync model files
-        update_auto_map(cfg.pretrained_checkpoint)
-        check_model_logic_mismatch(cfg.pretrained_checkpoint)
-
+    #     # Update config.json and sync model files
+    #     update_auto_map(cfg.pretrained_checkpoint)
+    #     check_model_logic_mismatch(cfg.pretrained_checkpoint)
+    
+    # 自動把 local 改過的版本同步到 cache
+    # cp -v /home/christinehsieh/openvla-oft-exp/prismatic/extern/hf/modeling_prismatic.py /home/christinehsieh/.cache/huggingface/modules/transformers_modules/moojink/openvla-7b-oft-finetuned-libero-object/4c89574e1c538b6c102f43f0526d60a9d3650148/modeling_prismatic.py
+    # local_modeling = Path(__file__).parent.parent.parent / "prismatic/extern/hf/modeling_prismatic.py"
+    # cache_dirs = Path.home() / ".cache/huggingface/modules/transformers_modules/moojink"
+    # for cache_path in cache_dirs.glob("*/modeling_prismatic.py"):
+    #     shutil.copy(local_modeling, cache_path)
     # Load the model
-    vla = AutoModelForVision2Seq.from_pretrained(
+    # vla = AutoModelForVision2Seq.from_pretrained(
+    #     cfg.pretrained_checkpoint,
+    #     # attn_implementation="flash_attention_2",
+    #     torch_dtype=torch.bfloat16,
+    #     load_in_8bit=cfg.load_in_8bit,
+    #     load_in_4bit=cfg.load_in_4bit,
+    #     low_cpu_mem_usage=True,
+    #     trust_remote_code=True,
+    # )
+    print("Loading model with local files...")
+    config = OpenVLAConfig.from_pretrained(cfg.pretrained_checkpoint)
+
+    vla = OpenVLAForActionPrediction.from_pretrained(
         cfg.pretrained_checkpoint,
-        # attn_implementation="flash_attention_2",
+        config=config,
         torch_dtype=torch.bfloat16,
-        load_in_8bit=cfg.load_in_8bit,
-        load_in_4bit=cfg.load_in_4bit,
         low_cpu_mem_usage=True,
-        trust_remote_code=False, # USE LOCAL CODE
     )
 
     # If using FiLM, wrap the vision backbone to allow for infusion of language inputs
@@ -796,6 +811,25 @@ def get_vla_action(
                 use_film=use_film,
                 logit_lens_layers=logit_lens_layers,
             )
+            # result = vla.predict_action(
+            #     **inputs,
+            #     unnorm_key=cfg.unnorm_key,
+            #     do_sample=False,
+            #     proprio=proprio,
+            #     proprio_projector=proprio_projector,
+            #     noisy_action_projector=noisy_action_projector,
+            #     action_head=action_head,
+            #     use_film=use_film,
+            #     logit_lens_layers=logit_lens_layers,
+            # )
+
+            # print("RESULT TYPE:", type(result))
+            # print("RESULT:", result)
+
+            # if isinstance(result, tuple):
+            #     print("RESULT LEN:", len(result))
+
+            # raise RuntimeError("DEBUG STOP")
 
     # Return action chunk as list of actions
     return [action[i] for i in range(len(action))], logit_lens

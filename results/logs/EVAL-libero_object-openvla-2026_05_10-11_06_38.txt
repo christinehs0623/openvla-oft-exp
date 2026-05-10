@@ -1,6 +1,0 @@
-Task suite       : libero_object
-Instruction mode : override: "None"
-Tasks to run     : [0]
-
-Task 0: pick up the alphabet soup and place it in the basket
-  Using instruction: "None"

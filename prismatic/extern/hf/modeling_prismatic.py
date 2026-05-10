@@ -884,6 +884,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         NUM_PATCHES,
         NUM_PROMPT_TOKENS,
         action_head=None,
+        logit_lens_layers=None,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
         # Zero out action token embeddings
@@ -910,12 +911,19 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         )
 
         # Extract hidden states for action tokens
-        last_hidden_states = language_model_output.hidden_states[-1]  # (B, seq_len, D)
+        # last_hidden_states = language_model_output.hidden_states[-1]  # (B, seq_len, D)
+        # actions_hidden_states = last_hidden_states[
+        #     :,
+        #     NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
+        #     :,
+        # ]  # (B, act_chunk_len, D)
+
+        last_hidden_states = language_model_output.hidden_states[-1]
         actions_hidden_states = last_hidden_states[
             :,
             NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
             :,
-        ]  # (B, act_chunk_len, D)
+        ]
 
         # Handle different prediction methods
         if action_head is not None:
@@ -938,8 +946,26 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+        
+        logit_lens_actions = None
+        if logit_lens_layers is not None and action_head is not None:
+            final_norm = self.language_model.model.norm
+            logit_lens_actions = {}
+            all_hidden_states = language_model_output.hidden_states  # tuple, len=33
 
-        return normalized_actions, actions_hidden_states
+            for layer_idx in logit_lens_layers:
+                hs = all_hidden_states[layer_idx + 1]  # +1 because hidden_states includes input embeddings as the first element
+                normed_hs = final_norm(hs)
+                action_hs = normed_hs[
+                    :,
+                    NUM_PATCHES + NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + ACTION_DIM * NUM_ACTIONS_CHUNK,
+                    :,
+                ]
+                pred = action_head.predict_action(action_hs)
+                logit_lens_actions[layer_idx] = pred.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM).float().cpu().detach().numpy()
+
+        return normalized_actions, actions_hidden_states, logit_lens_actions
+        # return normalized_actions, actions_hidden_states
 
     def predict_action(
         self,
@@ -950,6 +976,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_head=None,
         noisy_action_projector=None,
         use_film: bool = False,
+        logit_lens_layers=None,
         **kwargs: str,
     ) -> np.ndarray:
         """Predict actions from input sequence, with options for different prediction methods.
@@ -967,6 +994,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         Returns:
             Tuple of (unnormalized_actions, action_hidden_states)
         """
+
         # If the special empty token ('') does not already appear after the colon (':') token in the prompt
         # (after "OUT:" or "ASSISTANT:"), insert it to match the inputs seen at training time
         if not torch.all(input_ids[:, -1] == 29871):
@@ -1019,7 +1047,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             NUM_PATCHES += 1
         if use_diffusion:
             NUM_PATCHES += 1
-
+            
         if use_diffusion:
             # Sample random noise with shape equal to output action, used as the starting state for reverse diffusion
             noise = torch.randn(
@@ -1041,7 +1069,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             )
         else:
             # Run regression or discrete token-based prediction
-            normalized_actions, actions_hidden_states = self._regression_or_discrete_prediction(
+           
+            normalized_actions, actions_hidden_states, logit_lens_actions = self._regression_or_discrete_prediction(
                 input_embeddings,
                 all_actions_mask,
                 projected_patch_embeddings,
@@ -1050,12 +1079,19 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 NUM_PATCHES,
                 NUM_PROMPT_TOKENS,
                 action_head,
+                logit_lens_layers=logit_lens_layers,
             )
 
         # Unnormalize predicted actions
         actions = self._unnormalize_actions(normalized_actions, unnorm_key)
-
-        return actions, actions_hidden_states
+        # unnormalize logit lens actions（
+        logit_lens_unnorm = None
+        if logit_lens_actions is not None:
+            logit_lens_unnorm = {
+                layer: self._unnormalize_actions(acts, unnorm_key)
+                for layer, acts in logit_lens_actions.items()
+            }
+        return actions, actions_hidden_states, logit_lens_unnorm
 
     @staticmethod
     def _check_unnorm_key(norm_stats: Dict[str, Dict[str, Any]], unnorm_key: Optional[str]) -> str:

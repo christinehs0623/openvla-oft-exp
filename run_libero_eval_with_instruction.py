@@ -397,6 +397,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
                     noisy_action_projector, initial_states[episode_idx], log_file,
                     logit_lens_layers=cfg.logit_lens_layers,
                 )
+
+                # results[layer_idx] = {"success": success, "images": replay_images}
                 # 用 final layer 的結果來算 success rate（跟原本一致）
                 success = results["final"]["success"]
                 
