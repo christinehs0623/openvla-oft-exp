@@ -262,6 +262,62 @@ def run_episode(cfg, env, instruction, model, resize_size,
 
     return success, replay_images
 
+def run_logit_lens_episode(cfg, env, instruction, model, resize_size,
+                           processor, action_head, proprio_projector,
+                           noisy_action_projector, initial_state, log_file,
+                           logit_lens_layers=[0, 15, 31]):
+    
+    results = {}  # {layer_idx: {"success": bool, "images": []}}
+    max_steps = TASK_MAX_STEPS[cfg.task_suite_name]
+
+    # 對每個 layer 各跑一次獨立 trajectory
+    for layer_idx in logit_lens_layers + ["final"]:  # final = layer 31 的正常輸出
+        env.reset()
+        obs = env.set_init_state(initial_state)
+        
+        action_queue = deque(maxlen=cfg.num_open_loop_steps)
+        replay_images = []
+        t = 0
+        success = False
+        
+        while t < max_steps + cfg.num_steps_wait:
+            if t < cfg.num_steps_wait:
+                obs, _, _, _ = env.step(get_libero_dummy_action(cfg.model_family))
+                t += 1
+                continue
+            
+            observation, img = prepare_observation(obs, resize_size)
+            replay_images.append(img)
+            
+            if len(action_queue) == 0:
+                actions, logit_lens = get_action(
+                    cfg, model, observation, instruction,
+                    processor=processor,
+                    action_head=action_head,
+                    proprio_projector=proprio_projector,
+                    noisy_action_projector=noisy_action_projector,
+                    use_film=cfg.use_film,
+                    logit_lens_layers=logit_lens_layers,
+                )
+                
+                # 決定這個 trajectory 用哪一層的 action
+                if layer_idx == "final":
+                    chosen_actions = actions        
+                else:
+                    chosen_actions = logit_lens[layer_idx]  
+                
+                action_queue.extend(chosen_actions)
+            
+            action = action_queue.popleft()
+            obs, _, done, _ = env.step(action.tolist())
+            if done:
+                success = True
+                break
+            t += 1
+        
+        results[layer_idx] = {"success": success, "images": replay_images}
+    
+    return results
 
 @draccus.wrap()
 def eval_libero(cfg: GenerateConfig) -> None:
@@ -316,7 +372,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
         initial_states = task_suite.get_task_init_states(task_id)
         env, task_description = get_libero_env(task, cfg.model_family, resolution=cfg.env_img_res)
         # print(env.sim.model.camera_names) # ('frontview', 'birdview', 'agentview', 'sideview', 'galleryview', 'robot0_robotview', 'robot0_eye_in_hand')
-        
 
         instruction = get_instruction(task_description, cfg.instruction_override)
 
@@ -325,38 +380,59 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
         task_episodes, task_successes = 0, 0
 
+        cfg.logit_lens_layers = [0, 15, 31]
+        if cfg.instruction_override == "ORIGINAL":
+            condition_label = "original"
+        elif cfg.instruction_override == "None":
+            condition_label = "null"
+        else:
+            condition_label = "counterfactual"
+
         for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task), leave=False):
-            success, replay_images = run_episode(
-                cfg, env, instruction, model, resize_size,
-                processor, action_head, proprio_projector,
-                noisy_action_projector, initial_states[episode_idx], log_file,
-            )
+            if cfg.logit_lens_layers is not None:
+                # Logit lens mode：對每個 layer 各跑一次 trajectory
+                results = run_logit_lens_episode(
+                    cfg, env, instruction, model, resize_size,
+                    processor, action_head, proprio_projector,
+                    noisy_action_projector, initial_states[episode_idx], log_file,
+                    logit_lens_layers=cfg.logit_lens_layers,
+                )
+                # 用 final layer 的結果來算 success rate（跟原本一致）
+                success = results["final"]["success"]
+                
+                # 存每個 layer 的 video
+                for layer_idx, result in results.items():
+                    save_rollout_video(
+                        result["images"], total_episodes,
+                        success=result["success"],
+                        task_description=f"{condition_label}__{task_description}__layer{layer_idx}",
+                        task_name=f"{cfg.task_suite_name}_{task_id}",
+                        log_file=log_file,
+                    )
+            else:
+                success, replay_images = run_episode(
+                    cfg, env, instruction, model, resize_size,
+                    processor, action_head, proprio_projector,
+                    noisy_action_projector, initial_states[episode_idx], log_file,
+                )
+
+                # save_rollout_video(
+                #     replay_images, total_episodes, success=done, task_description=f"{condition_label}__{task_description}", log_file=log_file
+                # )
+
+                save_rollout_video(
+                    replay_images, total_episodes,
+                    success=success,
+                    task_description=f"{condition_label}__{task_description}",
+                    task_name=f"{cfg.task_suite_name}_{task_id}",
+                    log_file=log_file,
+                )
 
             task_episodes += 1
             total_episodes += 1
             if success:
                 task_successes += 1
                 total_successes += 1
-                        # Save a replay video of the episode
-            if cfg.instruction_override == "ORIGINAL":
-                condition_label = "original"
-            elif cfg.instruction_override == "None":
-                condition_label = "null"
-            else:
-                condition_label = "counterfactual"
-                
-            # save_rollout_video(
-            #     replay_images, total_episodes, success=done, task_description=f"{condition_label}__{task_description}", log_file=log_file
-            # )
-
-            save_rollout_video(
-                replay_images, total_episodes,
-                success=success,
-                task_description=f"{condition_label}__{task_description}",
-                task_name=f"{cfg.task_suite_name}_{task_id}",
-                log_file=log_file,
-            )
-
             log_message(f"  Episode {episode_idx+1}: {'SUCCESS' if success else 'FAIL'}", log_file)
 
         task_sr = task_successes / task_episodes if task_episodes > 0 else 0.0

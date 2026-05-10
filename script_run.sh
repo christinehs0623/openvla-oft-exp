@@ -31,3 +31,12 @@ python run_all_conditions.py \
     --counterfactual_map counterfactual_map.json \
     --output_dir ./results \
     --num_trials_per_task 20
+
+python run_all_conditions.py \
+    --checkpoint moojink/openvla-7b-oft-finetuned-libero-object \
+    --task_suite_name libero_object \
+    --conditions null \
+    --task_ids 0 \
+    --counterfactual_map counterfactual_map.json \
+    --output_dir ./results \
+    --num_trials_per_task 20
